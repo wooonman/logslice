@@ -31,6 +31,9 @@ logslice --source api.log --source worker.log "service=payments AND level=WARN"
 
 # Pipe from stdin
 tail -f app.log | logslice "status_code>=500"
+
+# Output only specific fields
+logslice --source app.log --fields timestamp,level,message "level=ERROR"
 ```
 
 **Example output:**
@@ -47,7 +50,17 @@ tail -f app.log | logslice "status_code>=500"
 | `=` | `level=ERROR` | Exact match |
 | `!=` | `level!=DEBUG` | Not equal |
 | `>=`, `<=` | `status_code>=500` | Numeric comparison |
+| `~` | `message~timeout` | Substring match |
 | `AND` / `OR` | `level=ERROR AND service=api` | Boolean logic |
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--source` | Log file to read from (can be repeated) |
+| `--fields` | Comma-separated list of fields to include in output |
+| `--follow` | Keep reading as the file grows (like `tail -f`) |
+| `--no-color` | Disable colorized output |
 
 ---
 
