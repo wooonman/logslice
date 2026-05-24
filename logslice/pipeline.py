@@ -1,79 +1,54 @@
-"""Build a processing pipeline from CLI / programmatic options."""
+"""Build a processing pipeline from a stream of records."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Iterator
 
-from logslice.deduplicator import dedup_by, dedup_exact
-from logslice.enricher import enrich_index, enrich_static, enrich_timestamp
-from logslice.query import apply_filters, parse_query
+from logslice.query import parse_query, apply_filters
 from logslice.sampler import sample
-from logslice.transformer import drop_fields, keep_fields, rename_fields
+from logslice.deduplicator import dedup_exact, dedup_by
+from logslice.merger import merge
 
-Record = Dict[str, Any]
+
+def _head(records: Iterator[dict], n: int) -> Iterator[dict]:
+    for i, r in enumerate(records):
+        if i >= n:
+            break
+        yield r
 
 
 def build_pipeline(
-    records: Iterable[Record],
-    *,
-    query: Optional[str] = None,
-    limit: Optional[int] = None,
-    # transformer options
-    drop: Optional[List[str]] = None,
-    keep: Optional[List[str]] = None,
-    rename: Optional[Dict[str, str]] = None,
-    # enricher options
-    add_index: bool = False,
-    add_timestamp_iso: bool = False,
-    static_fields: Optional[Dict[str, Any]] = None,
-    # dedup options
-    dedup_fields: Optional[List[str]] = None,
-    dedup_exact_match: bool = False,
-    # sampler options
-    sample_n: Optional[int] = None,
-    sample_rate: Optional[float] = None,
-) -> Iterator[Record]:
-    """Chain transformations and return a lazy iterator of processed records."""
-    stream: Iterable[Record] = records
+    records: Iterator[dict],
+    query: str | None = None,
+    limit: int | None = None,
+    sample_n: int | None = None,
+    sample_prob: float | None = None,
+    dedup: bool = False,
+    dedup_fields: list[str] | None = None,
+    merge_streams: list[Iterator[dict]] | None = None,
+    merge_key: str | None = "timestamp",
+) -> Iterator[dict]:
+    """Chain query, sampling, dedup and merge steps into a single pipeline."""
+
+    if merge_streams:
+        all_streams = [records, *merge_streams]
+        records = merge(all_streams, key=merge_key)
 
     if query:
         filters = parse_query(query)
-        stream = apply_filters(stream, filters)
+        records = apply_filters(records, filters)
 
-    if drop:
-        stream = drop_fields(stream, drop)
+    if sample_n is not None:
+        records = sample(records, every_n=sample_n)
+    elif sample_prob is not None:
+        records = sample(records, probability=sample_prob)
 
-    if keep:
-        stream = keep_fields(stream, keep)
-
-    if rename:
-        stream = rename_fields(stream, rename)
-
-    if static_fields:
-        stream = enrich_static(stream, static_fields)
-
-    if add_timestamp_iso:
-        stream = enrich_timestamp(stream)
-
-    if add_index:
-        stream = enrich_index(stream)
-
-    if dedup_exact_match:
-        stream = dedup_exact(stream)
-    elif dedup_fields:
-        stream = dedup_by(stream, dedup_fields)
-
-    if sample_n is not None or sample_rate is not None:
-        stream = sample(stream, every_n=sample_n, rate=sample_rate)
+    if dedup_fields:
+        records = dedup_by(records, fields=dedup_fields)
+    elif dedup:
+        records = dedup_exact(records)
 
     if limit is not None:
-        stream = _head(stream, limit)
+        records = _head(records, limit)
 
-    return stream  # type: ignore[return-value]
-
-
-def _head(records: Iterable[Record], n: int) -> Iterator[Record]:
-    for i, record in enumerate(records):
-        if i >= n:
-            break
-        yield record
+    return records
