@@ -60,6 +60,23 @@ def test_merge_sorted_preserves_all_records():
     assert len(result) == 5
 
 
+def test_merge_sorted_no_streams():
+    """merge_sorted with an empty list of streams should yield nothing."""
+    result = list(merge_sorted([]))
+    assert result == []
+
+
+def test_merge_sorted_stable_equal_timestamps():
+    """Records with identical timestamps should all be present in output."""
+    ts = "2024-01-01T00:00:01"
+    a = [_r(ts, src="a")]
+    b = [_r(ts, src="b")]
+    result = list(merge_sorted([a, b]))
+    assert len(result) == 2
+    sources = {r["src"] for r in result}
+    assert sources == {"a", "b"}
+
+
 # ---------------------------------------------------------------------------
 # merge_unordered
 # ---------------------------------------------------------------------------
