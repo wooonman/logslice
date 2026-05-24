@@ -1,68 +1,60 @@
-"""Build a processing pipeline from CLI / programmatic options."""
+"""Build a processing pipeline from a set of options."""
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Iterator
+from typing import Iterable, Iterator
 
-from logslice.query import parse_query, apply_filters
+from logslice.deduplicator import dedup_exact
+from logslice.query import apply_filters, parse_query
 from logslice.sampler import sample
-from logslice.deduplicator import dedup_exact, dedup_by
-from logslice.redactor import redact_fields, redact_pattern
+from logslice.truncator import truncate_fields
 
 
 def _head(records: Iterable[dict], n: int) -> Iterator[dict]:
-    for i, record in enumerate(records):
+    for i, rec in enumerate(records):
         if i >= n:
             break
-        yield record
+        yield rec
 
 
-def build_pipeline(records: Iterable[dict], options: Any) -> Iterator[dict]:
-    """Apply a chain of transforms driven by *options* (argparse Namespace or dict).
+def build_pipeline(
+    records: Iterable[dict],
+    *,
+    query: str | None = None,
+    limit: int | None = None,
+    dedup: bool = False,
+    sample_rate: float | None = None,
+    sample_n: int | None = None,
+    truncate: dict[str, int] | None = None,
+) -> Iterator[dict]:
+    """Compose a pipeline of transformations over *records*.
 
-    Supported option attributes
-    ---------------------------
-    query        : str   – filter expression
-    limit        : int   – max records to emit
-    sample_n     : int   – keep every N-th record
-    dedup        : bool  – exact-dedup on full record
-    dedup_by     : list  – dedup by named fields
-    redact       : list  – field names to redact
-    redact_pattern: str  – regex pattern to redact from string values
+    Parameters
+    ----------
+    records:     Source iterable of parsed log dicts.
+    query:       Optional filter expression (see ``parse_query``).
+    limit:       Stop after this many records.
+    dedup:       Remove exact duplicate records.
+    sample_rate: Keep each record with this probability (0.0–1.0).
+    sample_n:    Keep every N-th record.
+    truncate:    Mapping of {field: max_length} passed to ``truncate_fields``.
     """
-    if isinstance(options, dict):
-        get = options.get
-    else:
-        get = lambda k, d=None: getattr(options, k, d)  # noqa: E731
-
     stream: Iterable[dict] = records
 
-    query = get("query")
     if query:
         filters = parse_query(query)
         stream = apply_filters(stream, filters)
 
-    sample_n = get("sample_n")
-    if sample_n and sample_n > 1:
-        stream = sample(stream, every_n=sample_n)
+    if truncate:
+        stream = truncate_fields(stream, truncate)
 
-    if get("dedup"):
+    if dedup:
         stream = dedup_exact(stream)
 
-    dedup_fields = get("dedup_by")
-    if dedup_fields:
-        stream = dedup_by(stream, fields=dedup_fields)
+    if sample_rate is not None or sample_n is not None:
+        stream = sample(stream, every_n=sample_n, probability=sample_rate)
 
-    redact_flds = get("redact")
-    if redact_flds:
-        stream = redact_fields(stream, fields=redact_flds)
-
-    rx = get("redact_pattern")
-    if rx:
-        stream = redact_pattern(stream, pattern=rx)
-
-    limit = get("limit")
-    if limit and limit > 0:
+    if limit is not None:
         stream = _head(stream, limit)
 
-    return stream
+    return iter(stream)
