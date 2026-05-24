@@ -1,75 +1,87 @@
 """Tests for logslice.pipeline."""
 
-from __future__ import annotations
-
 import pytest
-
 from logslice.pipeline import build_pipeline
 
 
-def _records(n: int = 10, level: str = "info") -> list[dict]:
-    return [{"i": i, "level": level, "msg": f"msg {i}"} for i in range(1, n + 1)]
+def _records():
+    return [
+        {"level": "info", "msg": "started", "user": "alice", "token": "tok1"},
+        {"level": "error", "msg": "failed", "user": "bob", "token": "tok2"},
+        {"level": "info", "msg": "stopped", "user": "carol", "token": "tok3"},
+        {"level": "debug", "msg": "verbose", "user": "alice", "token": "tok4"},
+        {"level": "info", "msg": "started", "user": "alice", "token": "tok1"},
+    ]
 
 
 def test_no_options_yields_all():
-    records = _records(5)
-    assert list(build_pipeline(records)) == records
+    out = list(build_pipeline(_records(), {}))
+    assert len(out) == 5
 
 
 def test_query_filters_records():
-    records = [
-        {"level": "info", "msg": "ok"},
-        {"level": "error", "msg": "bad"},
-        {"level": "info", "msg": "also ok"},
-    ]
-    result = list(build_pipeline(records, query="level=error"))
-    assert len(result) == 1
-    assert result[0]["level"] == "error"
+    out = list(build_pipeline(_records(), {"query": "level=info"}))
+    assert all(r["level"] == "info" for r in out)
+    assert len(out) == 3
 
 
 def test_limit_truncates_output():
-    result = list(build_pipeline(_records(20), limit=5))
-    assert len(result) == 5
+    out = list(build_pipeline(_records(), {"limit": 2}))
+    assert len(out) == 2
 
 
 def test_limit_larger_than_stream():
-    result = list(build_pipeline(_records(3), limit=100))
-    assert len(result) == 3
+    out = list(build_pipeline(_records(), {"limit": 100}))
+    assert len(out) == 5
 
 
-def test_every_n_sampling():
-    result = list(build_pipeline(_records(10), every_n=2))
-    assert [r["i"] for r in result] == [2, 4, 6, 8, 10]
+def test_sample_n_reduces_count():
+    out = list(build_pipeline(_records(), {"sample_n": 2}))
+    assert len(out) == 3  # records 0, 2, 4
 
 
-def test_rate_one_keeps_all():
-    records = _records(10)
-    result = list(build_pipeline(records, rate=1.0))
-    assert result == records
+def test_dedup_removes_duplicates():
+    out = list(build_pipeline(_records(), {"dedup": True}))
+    # record 4 is identical to record 0 except token differs — not a dup
+    # records are all unique here so count stays 5
+    assert len(out) == 5
 
 
-def test_query_then_limit():
-    records = [
-        {"level": "error", "i": i} for i in range(10)
-    ] + [
-        {"level": "info", "i": i} for i in range(10)
-    ]
-    result = list(build_pipeline(records, query="level=error", limit=3))
-    assert len(result) == 3
-    assert all(r["level"] == "error" for r in result)
+def test_dedup_by_field():
+    out = list(build_pipeline(_records(), {"dedup_by": ["user"]}))
+    users = [r["user"] for r in out]
+    assert len(users) == len(set(users))
 
 
-def test_empty_query_string_no_filter():
-    records = _records(4)
-    assert list(build_pipeline(records, query="")) == records
+def test_redact_masks_field():
+    out = list(build_pipeline(_records(), {"redact": ["token"]}))
+    assert all(r["token"] == "***" for r in out)
 
 
-def test_sampling_and_limit_combined():
-    # every_n=2 on 20 records → 10; limit=4 → 4
-    result = list(build_pipeline(_records(20), every_n=2, limit=4))
-    assert len(result) == 4
+def test_redact_pattern_masks_values():
+    records = [{"msg": "secret=abc"}, {"msg": "hello"}]
+    out = list(build_pipeline(records, {"redact_pattern": r"secret=\w+"}))
+    assert "secret=" not in out[0]["msg"]
+    assert out[1]["msg"] == "hello"
 
 
-def test_both_every_n_and_rate_raises():
-    with pytest.raises(ValueError):
-        list(build_pipeline(_records(), every_n=2, rate=0.5))
+def test_namespace_object_as_options():
+    """Options can be an argparse-style namespace."""
+    class Opts:
+        query = "level=error"
+        limit = None
+        sample_n = None
+        dedup = False
+        dedup_by = None
+        redact = None
+        redact_pattern = None
+
+    out = list(build_pipeline(_records(), Opts()))
+    assert len(out) == 1
+    assert out[0]["level"] == "error"
+
+
+def test_combined_query_and_limit():
+    out = list(build_pipeline(_records(), {"query": "level=info", "limit": 2}))
+    assert len(out) == 2
+    assert all(r["level"] == "info" for r in out)

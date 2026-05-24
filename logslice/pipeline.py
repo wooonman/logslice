@@ -1,72 +1,68 @@
-"""Build and execute a processing pipeline from CLI / API options."""
+"""Build a processing pipeline from CLI / programmatic options."""
 
 from __future__ import annotations
 
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
-from logslice.query import apply_filters, parse_query
+from logslice.query import parse_query, apply_filters
 from logslice.sampler import sample
-from logslice.ratelimiter import rate_limit
+from logslice.deduplicator import dedup_exact, dedup_by
+from logslice.redactor import redact_fields, redact_pattern
 
 
 def _head(records: Iterable[dict], n: int) -> Iterator[dict]:
-    for i, r in enumerate(records):
+    for i, record in enumerate(records):
         if i >= n:
             break
-        yield r
+        yield record
 
 
-def build_pipeline(
-    records: Iterable[dict],
-    *,
-    query: str | None = None,
-    limit: int | None = None,
-    sample_n: int | None = None,
-    sample_prob: float | None = None,
-    rate: int | None = None,
-    rate_window: float = 1.0,
-    throttle_interval: float | None = None,
-) -> Iterator[dict]:
-    """Wrap *records* in a chain of processing stages driven by options.
+def build_pipeline(records: Iterable[dict], options: Any) -> Iterator[dict]:
+    """Apply a chain of transforms driven by *options* (argparse Namespace or dict).
 
-    Stages applied in order:
-      1. Query filtering
-      2. Sampling  (every-N or probability)
-      3. Rate limiting  (sliding window)
-      4. Throttle  (minimum inter-record interval)
-      5. Limit  (hard cap on total records)
-
-    Args:
-        records: Source iterable of parsed JSON dicts.
-        query: Optional filter expression (see :mod:`logslice.query`).
-        limit: Stop after this many records.
-        sample_n: Keep every *sample_n*-th record.
-        sample_prob: Keep each record with this probability (0–1).
-        rate: Maximum records per *rate_window* seconds.
-        rate_window: Window size in seconds for rate limiting.
-        throttle_interval: Minimum seconds between consecutive records.
-
-    Yields:
-        Processed records.
+    Supported option attributes
+    ---------------------------
+    query        : str   – filter expression
+    limit        : int   – max records to emit
+    sample_n     : int   – keep every N-th record
+    dedup        : bool  – exact-dedup on full record
+    dedup_by     : list  – dedup by named fields
+    redact       : list  – field names to redact
+    redact_pattern: str  – regex pattern to redact from string values
     """
+    if isinstance(options, dict):
+        get = options.get
+    else:
+        get = lambda k, d=None: getattr(options, k, d)  # noqa: E731
+
     stream: Iterable[dict] = records
 
+    query = get("query")
     if query:
         filters = parse_query(query)
         stream = apply_filters(stream, filters)
 
-    if sample_n is not None or sample_prob is not None:
-        stream = sample(stream, every_n=sample_n, probability=sample_prob)
+    sample_n = get("sample_n")
+    if sample_n and sample_n > 1:
+        stream = sample(stream, every_n=sample_n)
 
-    if rate is not None:
-        from logslice.ratelimiter import rate_limit as _rl
-        stream = _rl(stream, max_per_window=rate, window_seconds=rate_window)
+    if get("dedup"):
+        stream = dedup_exact(stream)
 
-    if throttle_interval is not None:
-        from logslice.ratelimiter import throttle as _th
-        stream = _th(stream, min_interval=throttle_interval)
+    dedup_fields = get("dedup_by")
+    if dedup_fields:
+        stream = dedup_by(stream, fields=dedup_fields)
 
-    if limit is not None:
+    redact_flds = get("redact")
+    if redact_flds:
+        stream = redact_fields(stream, fields=redact_flds)
+
+    rx = get("redact_pattern")
+    if rx:
+        stream = redact_pattern(stream, pattern=rx)
+
+    limit = get("limit")
+    if limit and limit > 0:
         stream = _head(stream, limit)
 
-    yield from stream
+    return stream
